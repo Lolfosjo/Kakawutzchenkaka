@@ -21,10 +21,7 @@ use muqsit\vanillagenerator\generator\overworld\biome\BiomeHeightManager;
 use muqsit\vanillagenerator\generator\overworld\biome\BiomeIds;
 use muqsit\vanillagenerator\generator\overworld\populator\OverworldPopulator;
 use muqsit\vanillagenerator\generator\overworld\populator\SnowPopulator;
-use muqsit\vanillagenerator\generator\overworld\terrain\BiomeTerrainManager;
-use muqsit\vanillagenerator\generator\overworld\terrain\types\DesertTerrain;
-use muqsit\vanillagenerator\generator\overworld\terrain\types\BeachTerrain;
-use muqsit\vanillagenerator\generator\overworld\terrain\types\PlainsTerrain;
+use muqsit\vanillagenerator\generator\overworld\terrain\TerrainBlender;
 use muqsit\vanillagenerator\generator\utils\preset\SimpleGeneratorPreset;
 use muqsit\vanillagenerator\generator\utils\WorldOctaves;
 use muqsit\vanillagenerator\generator\VanillaBiomeGrid;
@@ -66,40 +63,10 @@ class OverworldGenerator extends VanillaGenerator{
 	}
 
 	public static function init() : void{
-		// Initialisiere das Biome-Terrain-System
-		BiomeTerrainManager::init();
+		// ENTFERNT: Alte deprecated BiomeTerrainManager::init() und registerTerrain() Aufrufe
+		// Das TerrainBlender-System benötigt keine explizite Registrierung
 		
-		// Registriere spezifische Terrain-Typen
-		// Strand-Terrain
-
-  BiomeTerrainManager::registerTerrain(
-			new PlainsTerrain(),
-			BiomeIds::PLAINS,
-			BiomeIds::SUNFLOWER_PLAINS,
-   BiomeIds::BIRCH_FOREST,
-   BiomeIds::FOREST,
-   BiomeIds::RIVER
-		);
-
-		BiomeTerrainManager::registerTerrain(
-			new BeachTerrain(),
-			BiomeIds::BEACH,
-			BiomeIds::COLD_BEACH
-		);
-		
-		// Wüsten-Terrain
-		BiomeTerrainManager::registerTerrain(
-			new DesertTerrain(), 
-			BiomeIds::DESERT, 
-			BiomeIds::DESERT_HILLS, 
-			BiomeIds::DESERT_MUTATED,
-		);
-		
-		// Weitere Terrain-Typen können hier registriert werden:
-		// BiomeTerrainManager::registerTerrain(new MountainTerrain(), BiomeIds::EXTREME_HILLS);
-		// BiomeTerrainManager::registerTerrain(new ForestTerrain(), BiomeIds::FOREST, BiomeIds::FOREST_HILLS);
-
-		// GROUND GENERATORS (wie vorher) - für Oberflächenblöcke
+		// GROUND GENERATORS (behalten wir für Oberflächendetails)
 		self::setBiomeSpecificGround(new SandyGroundGenerator(), BiomeIds::BEACH, BiomeIds::COLD_BEACH, BiomeIds::DESERT, BiomeIds::DESERT_HILLS, BiomeIds::DESERT_MUTATED);
 		self::setBiomeSpecificGround(new RockyGroundGenerator(), BiomeIds::STONE_BEACH);
 		self::setBiomeSpecificGround(new SnowyGroundGenerator(), BiomeIds::ICE_PLAINS_SPIKES);
@@ -112,10 +79,7 @@ class OverworldGenerator extends VanillaGenerator{
 		self::setBiomeSpecificGround(new MesaGroundGenerator(MesaGroundGenerator::BRYCE), BiomeIds::MESA_BRYCE);
 		self::setBiomeSpecificGround(new MesaGroundGenerator(MesaGroundGenerator::FOREST), BiomeIds::MESA_PLATEAU_STONE, BiomeIds::MESA_PLATEAU_STONE_MUTATED);
 
-		// fill a 5x5 array with values that acts as elevation weight on chunk neighboring,
-		// this can be viewed as a parabolic field: the center gets the more weight, and the
-		// weight decreases as distance increases from the center. This is applied on the
-		// lower scale biome grid.
+		// fill a 5x5 array with values that acts as elevation weight on chunk neighboring
 		for($x = 0; $x < 5; ++$x){
 			for($z = 0; $z < 5; ++$z){
 				$sq_x = $x - 2;
@@ -198,9 +162,9 @@ class OverworldGenerator extends VanillaGenerator{
 					$chunk->setBiomeId($x, $y, $z, $id);
 				}
 				
-				// Verwende das neue geblendete Terrain-System für sanfte Übergänge
+				// AKTUALISIERT: Direkter TerrainBlender-Aufruf (ersetzt deprecated BiomeTerrainManager)
 				if($id !== null){
-					BiomeTerrainManager::generateBlendedTerrainColumn(
+					TerrainBlender::generateBlendedTerrainColumn(
 						$world, 
 						$this->random, 
 						$cx + $x, 
@@ -209,14 +173,56 @@ class OverworldGenerator extends VanillaGenerator{
 						$surface_noise[$x | $z << Chunk::COORD_BIT_SIZE],
 						$density,
 						$chunk_x,
-						$chunk_z
+						$chunk_z,
+						64 // sea_level - Standard Minecraft Wert
 					);
-					
-					// Dann verwende die GroundGeneratoren für die Oberfläche (wie vorher)
+				}
+			}
+		}
+		
+		// Führe nach dem Terrain-Generation die GroundGenerator aus
+		// Diese überschreiben nur die obersten 1-3 Blöcke für Biom-spezifische Details
+		$this->applyGroundGenerators($world, $chunk_x, $chunk_z, $grid, $surface_noise);
+	}
+
+	/**
+	 * Wendet die GroundGeneratoren an (nur für oberflächliche Details)
+	 */
+	private function applyGroundGenerators(ChunkManager $world, int $chunk_x, int $chunk_z, VanillaBiomeGrid $grid, array $surface_noise): void {
+		$cx = $chunk_x << Chunk::COORD_BIT_SIZE;
+		$cz = $chunk_z << Chunk::COORD_BIT_SIZE;
+		
+		/** @var SimplexOctaveGenerator $octave_generator */
+		$octave_generator = $this->getWorldOctaves()->surface;
+		$size_x = $octave_generator->size_x;
+		$size_z = $octave_generator->size_z;
+		
+		// Wende GroundGenerators nur auf die obersten Schichten an
+		for($x = 0; $x < $size_x; ++$x){
+			for($z = 0; $z < $size_z; ++$z){
+				$id = $grid->getBiome($x, $z);
+				if($id !== null){
+					// Prüfe ob für dieses Biom ein spezieller GroundGenerator registriert ist
 					if(array_key_exists($id, self::$GROUND_MAP)){
-						self::$GROUND_MAP[$id]->generateTerrainColumn($world, $this->random, $cx + $x, $cz + $z, $id, $surface_noise[$x | $z << Chunk::COORD_BIT_SIZE]);
-					}else{
-						$this->ground_gen->generateTerrainColumn($world, $this->random, $cx + $x, $cz + $z, $id, $surface_noise[$x | $z << Chunk::COORD_BIT_SIZE]);
+						// Verwende den spezifischen GroundGenerator nur für Oberflächendetails
+						self::$GROUND_MAP[$id]->generateTerrainColumn(
+							$world, 
+							$this->random, 
+							$cx + $x, 
+							$cz + $z, 
+							$id, 
+							$surface_noise[$x | $z << Chunk::COORD_BIT_SIZE]
+						);
+					} else {
+						// Verwende den Standard-GroundGenerator nur für Oberflächendetails
+						$this->ground_gen->generateTerrainColumn(
+							$world, 
+							$this->random, 
+							$cx + $x, 
+							$cz + $z, 
+							$id, 
+							$surface_noise[$x | $z << Chunk::COORD_BIT_SIZE]
+						);
 					}
 				}
 			}
@@ -263,17 +269,6 @@ class OverworldGenerator extends VanillaGenerator{
 		$x <<= 2;
 		$z <<= 2;
 
-		// Get biome grid data at lower res (scaled 4x, at this scale a chunk is 4x4 columns of
-		// the biome grid),
-		// we are loosing biome detail but saving huge amount of computation.
-		// We need 1 chunk (4 columns) + 1 column for later needed outer edges (1 column) and at
-		// least 2 columns
-		// on each side to be able to cover every value.
-		// 4 + 1 + 2 + 2 = 9 columns but the biomegrid generator needs a multiple of 2 so we ask
-		// 10 columns wide
-		// to the biomegrid generator.
-		// This gives a total of 81 biome grid columns to work with, and this includes the chunk
-		// neighborhood.
 		$biomeGrid = $this->getBiomeGridAtLowerRes($x - 2, $z - 2, 10, 10);
 
 		$octaves = $this->getWorldOctaves();
@@ -285,19 +280,6 @@ class OverworldGenerator extends VanillaGenerator{
 		$index = 0;
 		$index_height = 0;
 
-		// Sampling densities.
-		// Ideally we would sample 512 (4x4x32) values but in reality we need 825 values (5x5x33).
-		// This is because linear interpolation is done later to re-scale so we need right and
-		// bottom edge values if we want it to be "seamless".
-		// You can check this picture to have a visualization of how the biomegrid is traversed
-		// (2D plan):
-		// http://i.imgur.com/s4whlZE.png
-		// The big square grid represents our lower res biomegrid columns, and the very small
-		// square grid
-		// represents the normal biome grid columns (at block level) and the reason why it's
-		// required to
-		// re-scale it and do linear interpolation before densities can be used to generate raw
-		// terrain.
 		for($i = 0; $i < 5; ++$i){
 			for($j = 0; $j < 5; ++$j){
 				$avg_height_scale = 0.0;
@@ -305,8 +287,6 @@ class OverworldGenerator extends VanillaGenerator{
 				$total_weight = 0.0;
 				$biome = $biomeGrid[$i + 2 + ($j + 2) * 10];
 				$biome_height = BiomeHeightManager::get($biome);
-				// Sampling an average height base and scale by visiting the neighborhood
-				// of the current biomegrid column.
 				for($m = 0; $m < 5; ++$m){
 					for($n = 0; $n < 5; ++$n){
 						$near_biome = $biomeGrid[$i + $m + ($j + $n) * 10];
@@ -347,8 +327,6 @@ class OverworldGenerator extends VanillaGenerator{
 
 				$noise_h = ($noise_h * 0.2 + $avg_height_base) * self::BASE_SIZE / 8.0 * 4.0 + self::BASE_SIZE;
 				for($k = 0; $k < 33; ++$k){
-					// density should be lower and lower as we climb up, this gets a height value to
-					// subtract from the noise.
 					$nh = ($k - $noise_h) * self::STRETCH_Y * 128.0 / 256.0 / $avg_height_scale;
 					if($nh < 0.0){
 						$nh *= 4.0;
@@ -358,13 +336,11 @@ class OverworldGenerator extends VanillaGenerator{
 					$noise_r_2 = $roughness_noise_2[$index] / 512.0;
 					$noise_d = ($detail_noise[$index] / 10.0 + 1.0) / 2.0;
 
-					// linear interpolation
 					$dens = $noise_d < 0 ? $noise_r : ($noise_d > 1 ? $noise_r_2 : $noise_r + ($noise_r_2 - $noise_r) * $noise_d);
 					$dens -= $nh;
 					++$index;
 					if($k > 29){
 						$lowering = ($k - 29) / 3.0;
-						// linear interpolation
 						$dens = $dens * (1.0 - $lowering) + -10.0 * $lowering;
 					}
 					$density[self::densityHash($i, $j, $k)] = $dens;
